@@ -4,6 +4,7 @@ import json
 import sys
 
 State = namedtuple('State', ('obs', 'description', 'inventory'))
+BigState = namedtuple('BigState', ('obs', 'description', 'inventory', 'look', 'prev_action', 'prev_obs'))
 Transition = namedtuple('Transition', ('state', 'act', 'reward', 'next_state', 'next_acts', 'done'))
 
 

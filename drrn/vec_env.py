@@ -1,6 +1,9 @@
 from scienceworld import ScienceWorldEnv
 from multiprocessing import Process, Pipe
 
+from index_tools import Index
+
+import pdb
 import numpy as np
 import random
 import time
@@ -39,7 +42,8 @@ def sanitizeObservation(obsIn, infoIn):
 def resetWithVariation(env, variationMin, variationMax, simplificationStr):    
     variationIdx = random.randrange(variationMin, variationMax)          # train on range 0-20    
     env.reset()        
-    initialObs, initialDict = env.resetWithVariation(variationIdx, simplificationStr)
+    # initialObs, initialDict = env.resetWithVariation(variationIdx, simplificationStr)
+    initialObs, initialDict = env.reset()
     print("Simplifications: " + env.getSimplificationsUsed() )
     
     return initialObs, initialDict
@@ -47,7 +51,8 @@ def resetWithVariation(env, variationMin, variationMax, simplificationStr):
 def resetWithVariationTrain(env, simplificationStr):
     variationIdx = env.getRandomVariationTrain()        ## Random variation on train
     env.reset()    
-    initialObs, initialDict = env.resetWithVariation(variationIdx, simplificationStr)
+    # initialObs, initialDict = env.resetWithVariation(variationIdx, simplificationStr)
+    initialObs, initialDict = env.reset() 
     print("Simplifications: " + env.getSimplificationsUsed() )
 
     return initialObs, initialDict    
@@ -55,7 +60,8 @@ def resetWithVariationTrain(env, simplificationStr):
 def resetWithVariationDev(env, simplificationStr):
     variationIdx = env.getRandomVariationDev()          ## Random variation on dev
     env.reset()        
-    initialObs, initialDict = env.resetWithVariation(variationIdx, simplificationStr)
+    # initialObs, initialDict = env.resetWithVariation(variationIdx, simplificationStr)
+    initialObs, initialDict = env.reset()
     print("Simplifications: " + env.getSimplificationsUsed() )
     
     return initialObs, initialDict    
@@ -63,14 +69,15 @@ def resetWithVariationDev(env, simplificationStr):
 def resetWithVariationTest(env, simplificationStr):    
     variationIdx = env.getRandomVariationTest()        ## Random variation on test
     env.reset()        
-    initialObs, initialDict = env.resetWithVariation(variationIdx, simplificationStr)
+    # initialObs, initialDict = env.resetWithVariation(variationIdx, simplificationStr)
+    initialObs, initialDict = env.reset()
     print("Simplifications: " + env.getSimplificationsUsed() )
     
     return initialObs, initialDict    
 
 # Initialize a ScienceWorld environment directly from the API
 def initializeEnv(threadNum, args):    
-    env = ScienceWorldEnv("", None, args.env_step_limit, threadNum)
+    env = ScienceWorldEnv(taskName="", serverPath=None, envStepLimit=args.env_step_limit)
 
     taskNames = env.getTaskNames()    
     taskName = taskNames[args.task_idx]
@@ -158,7 +165,7 @@ def worker(remote, parent_remote, threadNum, args):
         print('SubprocVecEnv worker: got KeyboardInterrupt')
     finally:
         print ("------------------------------------ SHUTDOWN (Thread " + str(threadNum) + ")")
-        env.shutdown()  # Shut down ScienceWorld server for this thread
+        # env.shutdown()  # Shut down ScienceWorld server for this thread
         time.sleep(2)
 
 
@@ -226,3 +233,67 @@ class VecEnv:
 
     def _assert_not_closed(self):
         assert not self.closed, "Trying to operate on a SubprocVecEnv after calling close()"
+
+
+class AugmentedVecEnv(VecEnv):
+    def __init__(self, num_envs, programArgs):
+        super().__init__(num_envs, programArgs)
+
+        self.programArgs = programArgs
+        self.index = Index(programArgs.train_dir)
+        self.action_histories = [[] for _ in range(num_envs)]
+        self.hits = [0 for _ in range(num_envs)]
+
+    def reset(self):
+        obs, infos = super().reset()
+        self.action_histories = [[] for __ in range(len(self.action_histories))]
+        return obs, infos
+
+
+    def step(self, actions):
+        self._assert_not_closed()
+        assert len(actions) == self.num_envs, "Error: incorrect number of actions."
+        for remote, action in zip(self.remotes, actions):
+            remote.send(('step', action))
+        results = [remote.recv() for remote in self.remotes]
+
+        # update action history 
+        for i in range(self.num_envs):
+            self.action_histories[i].append(actions[i])
+        
+        # search using each action history 
+        extra_rewards = [0 for i in range(self.num_envs)]
+        for i, full_history in enumerate(self.action_histories):
+            # check all recent subsets of history
+            for start in range(len(full_history)-1):
+                history = full_history[start:]
+                history = tuple(history)
+                if self.programArgs.use_task_idx:
+                    task_idx = self.programArgs.task_idx
+                else:
+                    task_idx = None
+                try:
+                    print(f"trying: {history}")
+                    summary = self.index.action_to_summary_lut[history]
+                except KeyError:
+                    # no summary for this action history
+                    continue
+                # if summary exists, find the vote count 
+                print(f"found summary: {summary}")
+                count = self.index.get_vote_count(task_idx, history)
+                # if count is 0, then no votes for this summary, not a hit 
+                if count == 0:
+                    continue
+                else:
+                    # if count is > 0, then we have a hit
+                    # update the reward and reset history
+                    self.hits[i] += 1
+                    extra_rewards[i] += self.programArgs.count_reward * count
+                    self.action_histories[i] = []
+                    # don't keep going down in history size 
+                    break 
+
+        # self.waiting = False
+        obs, rewards, dones, infos = zip(*results)
+        rewards = [r + extra_rewards[i] for i, r in enumerate(rewards)]
+        return np.stack(obs), np.stack(rewards), np.stack(dones), infos

@@ -46,12 +46,16 @@ def raise_timeout(signum, frame):
 #
 #   DRRN
 #
-class DRRN_Agent:
+class DRRNAgent:
     def __init__(self, args):
         self.gamma = args.gamma
         self.batch_size = args.batch_size
         self.sp = spm.SentencePieceProcessor()
-        self.sp.Load(args.spm_path)
+        try:
+            self.sp.Load(args.spm_path)
+        except AttributeError:
+            pass 
+
         self.network = DRRN(len(self.sp), args.embedding_dim, args.hidden_dim).to(device)
         ## self.memory = ReplayMemory(args.memory_size)     ## PJ: Changing to more memory efficient memory, since the pickle files are enormous
         self.memory = PrioritizedReplayMemory(capacity = args.memory_size, priority_fraction = args.priority_fraction)     ## PJ: Changing to more memory efficient memory, since the pickle files are enormous
